@@ -25,13 +25,14 @@
 
 ## Özellikler
 
+Eklenti **Gmail içinde açık olan maili** işler. Ayrı bir gelen kutusu kopyalamaz — Gmail'i Gmail'den daha iyi yapmaya çalışmaz.
+
 | Özellik | Açıklama |
 |---|---|
-| **Gelen Kutusu** | Son 15 maili listeler, okunmamışları vurgular |
-| **Mail Detayı** | Gönderen, konu, tarih, etiketler ve içerik görüntüleme |
-| **Etiketleme** | Mevcut etiketleri listeleme, yeni etiket oluşturma, maile etiket uygulama |
-| **Mail Yazma** | Türkçe karakter destekli RFC 2822 formatında mail gönderimi |
-| **Yerel AI Özeti** | Harici API olmadan, kendi sunucunuzdaki modelle mail özetleme |
+| **Bağlam Algılama** | Gmail'de bir mail açıkken eklenti simgesine tıklayın, mail otomatik algılanır |
+| **Yerel AI Özeti** | Açık olan maili kendi sunucunuzdaki modelle özetler (harici API yok) |
+| **Akıllı Etiketleme** | AI mail içeriğine göre etiket önerir; Gmail'inizde varsa onu uygular, yoksa otomatik oluşturup uygular |
+| **Hızlı Yanıt** | "Mail Yaz" sekmesinde alıcı ve konu, açık olan mailden otomatik doldurulur |
 | **Ayarlar** | Tüm URL ve model bilgilerini arayüzden veya `config.json`'dan yönetme |
 
 ### Teknik Özellikler
@@ -50,18 +51,22 @@
 ```
 ┌─────────────────────────────────────────┐
 │  ✉ Gmail Yardımcısı        [Giriş Yap] │
-├──────────┬──────────┬────────┬──────────┤
-│ ✉ Gelen │ ✏ Yaz   │🏷 Etiket│ ⚙ Ayar  │
-├──────────┴──────────┴────────┴──────────┤
-│  [↻ Yenile]                             │
+├──────────────┬──────────────┬───────────┤
+│  ⚡ Özetle   │  ✏ Mail Yaz │ ⚙ Ayarlar │
+├──────────────┴──────────────┴───────────┤
+│  ┌───────────────────────────────────┐  │
+│  │ A  Ali Veli <ali@firma.com>       │  │
+│  │    9 May 2026, 14:32              │  │
+│  │ Toplantı hatırlatması             │  │
+│  └───────────────────────────────────┘  │
+│  Yarınki toplantıyı unutmayın...        │
 │                                         │
-│  A  Ali Veli                            │
-│     Toplantı hatırlatması               │
-│     Yarınki toplantıyı unutmayın...     │
-│                                         │
-│  B  Banka                               │
-│     Hesap özeti                         │
-│     Ekim ayı hesap özeti hazır.         │
+│  [⚡ Özetle]  [🏷 Akıllı Etiketle]     │
+│  ┌───────────────────────────────────┐  │
+│  │ ⚡ Yapay Zeka Özeti               │  │
+│  │ • Toplantı yarın saat 10:00       │  │
+│  │ • Salon B-203                     │  │
+│  └───────────────────────────────────┘  │
 └─────────────────────────────────────────┘
 ```
 
@@ -224,9 +229,10 @@ Bu formatı destekleyen yerelde çalışan popüler araçlar:
 ```
 gmail-extension/
 ├── manifest.json        # Chrome eklenti tanımı (Manifest V3)
-├── popup.html           # Eklenti arayüzü
-├── popup.js             # Gmail API çağrıları, OAuth, AI özetleme
+├── popup.html           # Eklenti arayüzü (3 sekme: Özetle, Mail Yaz, Ayarlar)
+├── popup.js             # Gmail API, OAuth, AI özet ve akıllı etiketleme
 ├── popup.css            # Stiller
+├── content.js           # Gmail sekmesinde çalışır, açık olan mailin ID'sini popup'a iletir
 ├── background.js        # Service worker
 ├── config.json          # Tüm URL ve model ayarları — buradan yapılandırın
 ├── kur.bat              # Windows otomatik kurulum scripti
@@ -254,6 +260,9 @@ Google Cloud Console → OAuth consent screen → Test users kısmına kendi Gma
 
 **Yerel model çalışmıyor.**  
 Eklenti popupında **Ayarlar** sekmesini açın, `Yerel Model Adresi` alanının doğru olduğunu kontrol edin. Modelin çalıştığını terminalden `curl -X POST http://localhost:11434 -d '{"prompt":"test","model":"llama3"}'` komutuyla doğrulayabilirsiniz.
+
+**Eklenti "Gmail'de bir mail açın" diyor ama mail açıktı.**  
+Bu, eklentinin yeni kurulduğunda veya güncellendiğinde olabilir — Gmail sekmesini bir kez yenileyin (F5). Bu işlem `content.js`'in mevcut Gmail sekmesine enjekte edilmesini sağlar.
 
 **Türkçe karakterler bozuk gözüküyor.**  
 Bu durum yaşanmamalıdır; mail gönderimi UTF-8/MIME B encoding ile yapılmaktadır. Yaşanırsa lütfen [issue açın](../../issues).
