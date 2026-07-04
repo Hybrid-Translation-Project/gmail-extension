@@ -1,6 +1,4 @@
 {
   "backend_url": "http://localhost:8000",
-  "local_model_url": "http://localhost:11434",
-  "model_name": "local-model",
   "google_client_id": "BURAYA_GOOGLE_CLIENT_ID_YAZILACAK"
 }

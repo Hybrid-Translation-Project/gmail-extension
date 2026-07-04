@@ -13,14 +13,18 @@
       <div class="brand-icon"></div>
       <span class="brand-name">AI-Mail Assistant</span>
     </div>
+    <div id="backend-auth-area" class="backend-auth-area hidden">
+      <span id="backend-user-chip" class="backend-user-chip"></span>
+      <button id="btn-backend-logout" class="btn-auth">Çıkış</button>
+    </div>
     <div id="auth-area">
-      <button id="btn-login" class="btn-auth">Giriş Yap</button>
-      <button id="btn-logout" class="btn-auth hidden">Çıkış Yap</button>
+      <button id="btn-login" class="btn-auth">Gmail Giriş</button>
+      <button id="btn-logout" class="btn-auth hidden">Gmail Çıkış</button>
     </div>
   </header>
 
   <!-- TABS -->
-  <nav class="tabs" role="tablist">
+  <nav class="tabs hidden" id="main-tabs" role="tablist">
     <button class="tab-btn active" data-tab="tab-summarize" role="tab">Özetle</button>
     <button class="tab-btn" data-tab="tab-compose" role="tab">Mail Yaz</button>
     <button class="tab-btn" data-tab="tab-settings" role="tab">Ayarlar</button>
@@ -28,8 +32,32 @@
 
   <main class="main-scroll">
 
+    <!-- BACKEND GİRİŞ -->
+    <section id="backend-login" class="empty-state">
+      <div class="empty-icon">
+        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">
+          <path d="M12 15a3 3 0 100-6 3 3 0 000 6z"/>
+          <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 11-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06A1.65 1.65 0 005 15a1.65 1.65 0 00-1.51-1H3a2 2 0 110-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06A1.65 1.65 0 009 4.6a1.65 1.65 0 001-1.51V3a2 2 0 114 0v.09A1.65 1.65 0 0015 4.6a1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06A1.65 1.65 0 0019 9a1.65 1.65 0 001.51 1H21a2 2 0 110 4h-.09a1.65 1.65 0 00-1.51 1z"/>
+        </svg>
+      </div>
+      <p class="empty-title">Magi AI'ya giriş yapın</p>
+      <p class="empty-hint">Özetleme, akıllı etiketleme ve AI yanıt üretimi için<br/>sunucu hesabınızla giriş yapmanız gerekiyor.</p>
+
+      <form id="backend-login-form" class="form" style="width:100%; margin-top:8px;">
+        <input type="text" id="backend-username" class="field-input" placeholder="Kullanıcı adı" required autocomplete="username" />
+        <input type="password" id="backend-password" class="field-input" placeholder="Şifre" required autocomplete="current-password" />
+        <button type="submit" class="btn btn-primary">Giriş Yap</button>
+        <p id="backend-login-status" class="status-text"></p>
+      </form>
+
+      <div id="backend-pwd-notice" class="warn-banner hidden" style="width:100%; margin-top:8px;">
+        <span class="info-emoji">🔒</span>
+        <span>Devam etmeden önce şifrenizi web panelinden değiştirmeniz gerekiyor. Değiştirdikten sonra buradan tekrar giriş yapın.</span>
+      </div>
+    </section>
+
     <!-- ÖZETLE -->
-    <section id="tab-summarize" class="tab-panel active">
+    <section id="tab-summarize" class="tab-panel">
 
       <!-- Boş durum -->
       <div id="state-no-mail" class="empty-state hidden">
@@ -51,6 +79,17 @@
 
       <!-- Mail yüklendi -->
       <div id="state-mail-loaded" class="hidden">
+        <!-- 0) Bağlı olmayan Gmail hesabı uyarısı -->
+        <div id="account-warning" class="warn-banner hidden">
+          <span class="info-emoji">⚠️</span>
+          <div style="flex:1;">
+            <span>Bu Gmail hesabı (<strong id="account-warning-email"></strong>) Magi AI'ya bağlı değil. AI özellikleri için hesabı bağlayın.</span>
+            <div>
+              <button type="button" id="btn-link-account" class="btn btn-dark">Hesabı Bağla</button>
+            </div>
+          </div>
+        </div>
+
         <!-- 1) Mail Bağlam Kartı -->
         <div class="ctx-card">
           <div class="ctx-row">
@@ -61,7 +100,10 @@
                 <div class="ctx-subject" id="ctx-subject"></div>
               </div>
             </div>
-            <div class="ctx-date" id="ctx-date"></div>
+            <div style="display:flex; flex-direction:column; align-items:flex-end; gap:4px;">
+              <div class="ctx-date" id="ctx-date"></div>
+              <span id="sync-badge" class="sync-badge unsynced hidden"></span>
+            </div>
           </div>
           <div id="ctx-labels" class="label-chips"></div>
         </div>
@@ -109,6 +151,15 @@
           <button type="button" id="btn-clear-reply" class="reply-banner-close" aria-label="Kapat">×</button>
         </div>
 
+        <div id="ai-reply-actions" class="action-row hidden" style="margin-bottom:12px;">
+          <button type="button" id="btn-ai-generate-reply" class="btn btn-soft">
+            <span class="btn-emoji">✨</span> AI Yanıt Üret
+          </button>
+          <button type="button" id="btn-save-draft" class="btn btn-soft">
+            <span class="btn-emoji">💾</span> Taslak Kaydet
+          </button>
+        </div>
+
         <form id="compose-form" class="form">
           <input type="email" id="compose-to" class="field-input" placeholder="Alıcı" required />
           <input type="text" id="compose-subject" class="field-input" placeholder="Konu" required />
@@ -136,14 +187,6 @@
           <input type="url" id="cfg-backend-url" class="field-input" />
         </div>
         <div class="field">
-          <label class="field-label" for="cfg-model-url">Yerel AI Model Adresi</label>
-          <input type="url" id="cfg-model-url" class="field-input" />
-        </div>
-        <div class="field">
-          <label class="field-label" for="cfg-model-name">Kullanılan Model Adı</label>
-          <input type="text" id="cfg-model-name" class="field-input" />
-        </div>
-        <div class="field">
           <label class="field-label field-label-muted" for="cfg-client-id">Google Client ID</label>
           <div class="readonly-field">
             <span class="readonly-icon">🔒</span>
@@ -163,6 +206,7 @@
   </main>
 
   <div id="toast" class="toast hidden"></div>
+  <script src="backend.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

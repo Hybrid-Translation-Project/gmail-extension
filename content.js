@@ -19,9 +19,29 @@ function extractThreadIdFromHash() {
   return null;
 }
 
+// Gmail sekme başlığı genelde "... - kullanici@gmail.com - Gmail" şeklindedir.
+// Çoklu hesap girişinde (u/0, u/1...) chrome.identity hesabından farklı olabilir.
+function extractActiveAccountEmail() {
+  const title = document.title || "";
+  const match = title.match(/([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/);
+  if (match) return match[1];
+
+  const accountBtn = document.querySelector('a[aria-label*="@"], [aria-label*="Google Hesabı"], [aria-label*="Google Account"]');
+  if (accountBtn) {
+    const label = accountBtn.getAttribute("aria-label") || "";
+    const labelMatch = label.match(/([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/);
+    if (labelMatch) return labelMatch[1];
+  }
+
+  return null;
+}
+
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg && msg.type === "GET_CURRENT_MAIL") {
-    sendResponse({ threadId: extractThreadIdFromHash() });
+    sendResponse({
+      threadId: extractThreadIdFromHash(),
+      accountEmail: extractActiveAccountEmail(),
+    });
     return true;
   }
 });

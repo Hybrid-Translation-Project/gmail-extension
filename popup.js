@@ -9,8 +9,10 @@
 const GMAIL_API = "https://gmail.googleapis.com/gmail/v1/users/me";
 
 let runtimeConfig = null;
-let currentMail = null;        // { threadId, messageId, from, fromEmail, subject, date, body }
+let currentMail = null;        // { threadId, messageId, rfcMessageId, from, fromEmail, subject, date, body, backendMail }
 let cachedUserLabels = [];     // Kullanıcının kendi oluşturduğu Gmail etiketleri
+let linkedAccountsCache = null; // GET /api/v1/accounts/ sonucu (küçük harf email listesi olarak)
+let replyContextMailId = null;  // Senkron yanıt modunda backend Mail._id (writer/* için)
 
 // ----------------------- Yardımcı: Toast & Durum ---------------
 
@@ -106,6 +108,94 @@ function updateAuthUI(loggedIn) {
   document.getElementById("btn-logout").classList.toggle("hidden", !loggedIn);
 }
 
+// ----------------------- Backend Oturum Kapısı -----------------
+
+function showBackendLoginGate() {
+  document.getElementById("backend-login").classList.remove("hidden");
+  document.getElementById("backend-login-form").classList.remove("hidden");
+  document.getElementById("backend-pwd-notice").classList.add("hidden");
+  document.getElementById("main-tabs").classList.add("hidden");
+  document.getElementById("backend-auth-area").classList.add("hidden");
+  document.querySelectorAll(".tab-panel").forEach((p) => p.classList.remove("active"));
+}
+
+function showBackendPasswordChangeGate() {
+  document.getElementById("backend-login").classList.remove("hidden");
+  document.getElementById("backend-login-form").classList.add("hidden");
+  document.getElementById("backend-pwd-notice").classList.remove("hidden");
+  document.getElementById("main-tabs").classList.add("hidden");
+  document.getElementById("backend-auth-area").classList.add("hidden");
+  document.querySelectorAll(".tab-panel").forEach((p) => p.classList.remove("active"));
+}
+
+function enterBackendApp(session) {
+  document.getElementById("backend-login").classList.add("hidden");
+  document.getElementById("main-tabs").classList.remove("hidden");
+  document.getElementById("backend-auth-area").classList.remove("hidden");
+
+  const chip = document.getElementById("backend-user-chip");
+  const username = (session && (session.username || (session.user && session.user.username))) || "";
+  chip.textContent = username;
+
+  const activeTabBtn = document.querySelector(".tab-btn.active") || document.querySelector(".tab-btn");
+  if (activeTabBtn) {
+    document.getElementById(activeTabBtn.dataset.tab).classList.add("active");
+  }
+}
+
+async function onBackendLoginSubmit(e) {
+  e.preventDefault();
+  const username = document.getElementById("backend-username").value.trim();
+  const password = document.getElementById("backend-password").value;
+  setStatus("backend-login-status", "Giriş yapılıyor...");
+
+  try {
+    const { mustChangePassword } = await backendLogin(username, password);
+    if (mustChangePassword) {
+      showBackendPasswordChangeGate();
+      return;
+    }
+    setStatus("backend-login-status", "");
+    const session = await checkBackendSession();
+    enterBackendApp(session);
+    showToast("Giriş başarılı");
+
+    // Gmail bağlamı zaten yüklüyse tekrar dene
+    let loggedInGoogle = false;
+    try {
+      await getAuthToken(false);
+      loggedInGoogle = true;
+    } catch (_) {
+      loggedInGoogle = false;
+    }
+    updateAuthUI(loggedInGoogle);
+    if (loggedInGoogle) {
+      loadCurrentMail();
+    } else {
+      showState("state-no-mail");
+    }
+  } catch (err) {
+    setStatus("backend-login-status", err.message || "Giriş başarısız.", "error");
+  }
+}
+
+async function onBackendLogoutClick() {
+  await backendLogout();
+  showBackendLoginGate();
+  showToast("Çıkış yapıldı");
+}
+
+// Oturum ortasında token geçersiz kalırsa (refresh de başarısızsa) login ekranına döner.
+// true dönerse çağıran yerel hata mesajı göstermemeli (kullanıcı zaten login formuna yönlendirildi).
+function handleBackendActionError(err) {
+  if (err && err.name === "BackendAuthError" && err.kind === "login_required") {
+    showBackendLoginGate();
+    setStatus("backend-login-status", err.message, "error");
+    return true;
+  }
+  return false;
+}
+
 // ----------------------- Gmail API -----------------------------
 
 async function gmailFetch(path, options = {}) {
@@ -138,7 +228,7 @@ async function getActiveTabId() {
   return tabs && tabs[0] ? tabs[0] : null;
 }
 
-async function getCurrentThreadIdFromGmailTab() {
+async function getCurrentMailContextFromGmailTab() {
   const tab = await getActiveTabId();
   if (!tab || !tab.url || !tab.url.includes("mail.google.com")) {
     return null;
@@ -149,7 +239,7 @@ async function getCurrentThreadIdFromGmailTab() {
         resolve(null);
         return;
       }
-      resolve(res.threadId);
+      resolve(res);
     });
   });
 }
@@ -214,14 +304,66 @@ async function fetchUserLabels() {
   }
 }
 
+function normalizeMessageId(raw) {
+  if (!raw) return null;
+  return raw.trim().replace(/^<|>$/g, "").trim() || null;
+}
+
+async function fetchLinkedAccounts(force = false) {
+  if (linkedAccountsCache && !force) return linkedAccountsCache;
+  try {
+    const data = await backendFetch("/api/v1/accounts/", { method: "GET" });
+    const list = Array.isArray(data) ? data : data.accounts || [];
+    linkedAccountsCache = list.map((a) => (a.email || "").toLowerCase());
+  } catch (_) {
+    linkedAccountsCache = [];
+  }
+  return linkedAccountsCache;
+}
+
+async function checkAccountLinked(accountEmail) {
+  if (!accountEmail) return true; // tespit edilemediyse engelleme
+  const accounts = await fetchLinkedAccounts();
+  return accounts.includes(accountEmail.toLowerCase());
+}
+
+function renderAccountWarning(accountEmail, linked) {
+  const banner = document.getElementById("account-warning");
+  if (linked || !accountEmail) {
+    banner.classList.add("hidden");
+    return;
+  }
+  document.getElementById("account-warning-email").textContent = accountEmail;
+  banner.classList.remove("hidden");
+}
+
+async function onLinkAccountClick() {
+  if (!currentMail || !currentMail.accountEmail) return;
+  try {
+    const data = await backendFetch(
+      `/api/v1/accounts/oauth/google/url?email=${encodeURIComponent(currentMail.accountEmail)}`,
+      { method: "GET" }
+    );
+    const url = data.url || data.auth_url;
+    if (url) {
+      chrome.tabs.create({ url });
+    } else {
+      showToast("Bağlantı adresi alınamadı.");
+    }
+  } catch (err) {
+    showToast("Hata: " + err.message);
+  }
+}
+
 async function loadCurrentMail() {
   showState("state-loading");
 
-  const threadId = await getCurrentThreadIdFromGmailTab();
-  if (!threadId) {
+  const mailCtx = await getCurrentMailContextFromGmailTab();
+  if (!mailCtx || !mailCtx.threadId) {
     showState("state-no-mail");
     return;
   }
+  const { threadId, accountEmail } = mailCtx;
 
   try {
     const thread = await gmailFetch(`/threads/${threadId}?format=full`);
@@ -236,6 +378,9 @@ async function loadCurrentMail() {
     const fromHdr = headers.find((h) => h.name.toLowerCase() === "from")?.value || "";
     const subject = headers.find((h) => h.name.toLowerCase() === "subject")?.value || "(Konu yok)";
     const date = headers.find((h) => h.name.toLowerCase() === "date")?.value || "";
+    const rfcMessageId = normalizeMessageId(
+      headers.find((h) => h.name.toLowerCase() === "message-id")?.value
+    );
     const { name, email } = parseFromHeader(fromHdr);
 
     const body = extractBody(msg.payload);
@@ -243,12 +388,15 @@ async function loadCurrentMail() {
     currentMail = {
       threadId,
       messageId: msg.id,
+      rfcMessageId,
+      accountEmail,
       from: name || email,
       fromEmail: email,
       subject,
       date,
       body,
       labelIds: msg.labelIds || [],
+      backendMail: null,
     };
 
     renderMailContext();
@@ -259,10 +407,35 @@ async function loadCurrentMail() {
     fetchUserLabels();
 
     showState("state-mail-loaded");
+
+    // Hesap bağlantısı ve backend senkron durumu (arka planda, popup akışını bloklamadan)
+    checkAccountLinked(accountEmail).then((linked) => renderAccountWarning(accountEmail, linked));
+    if (rfcMessageId) {
+      backendFetch(`/api/v1/assist/mail-by-message-id/${encodeURIComponent(rfcMessageId)}`, { method: "GET" })
+        .then((res) => {
+          if (currentMail && currentMail.rfcMessageId === rfcMessageId && res && res.found) {
+            currentMail.backendMail = res.mail;
+            renderSyncBadge(true);
+            fillReplyContext();
+          } else {
+            renderSyncBadge(false);
+          }
+        })
+        .catch(() => renderSyncBadge(false));
+    } else {
+      renderSyncBadge(false);
+    }
   } catch (err) {
     showState("state-no-mail");
     showToast("Mail yüklenemedi: " + err.message);
   }
+}
+
+function renderSyncBadge(synced) {
+  const badge = document.getElementById("sync-badge");
+  badge.classList.remove("hidden", "synced", "unsynced");
+  badge.classList.add(synced ? "synced" : "unsynced");
+  badge.textContent = synced ? "Senkronize" : "Senkron değil";
 }
 
 // Çip renk paleti — etiket adına göre deterministik atanır (Tailwind'den)
@@ -329,6 +502,9 @@ function fillReplyContext() {
 
   const toEl = document.getElementById("compose-to");
   const subjEl = document.getElementById("compose-subject");
+  const bodyEl = document.getElementById("compose-body");
+  const aiActions = document.getElementById("ai-reply-actions");
+
   // Sadece boşsa veya değerleri otomatik doldurulmuşsa ezme
   if (!toEl.dataset.userEdited) {
     toEl.value = currentMail.fromEmail;
@@ -342,16 +518,87 @@ function fillReplyContext() {
       subjEl.value = `YNT: ${subj}`;
     }
   }
+
+  if (currentMail.backendMail) {
+    // Senkronize yanıt modu: gönderim writer/* üzerinden gider (mail.from_email hedeflenir,
+    // to/subject alanları writer tarafında yok sayılır — kafa karışıklığını önlemek için kilitle).
+    replyContextMailId = currentMail.backendMail._id;
+    toEl.disabled = true;
+    subjEl.disabled = true;
+    aiActions.classList.remove("hidden");
+    if (currentMail.backendMail.reply_draft && !bodyEl.dataset.userEdited) {
+      bodyEl.value = currentMail.backendMail.reply_draft;
+    }
+  } else {
+    replyContextMailId = null;
+    toEl.disabled = false;
+    subjEl.disabled = false;
+    aiActions.classList.add("hidden");
+  }
 }
 
 function clearReplyContext() {
   document.getElementById("reply-banner").classList.add("hidden");
+  document.getElementById("ai-reply-actions").classList.add("hidden");
   document.getElementById("compose-form").reset();
   ["compose-to", "compose-subject", "compose-body"].forEach((id) => {
     const el = document.getElementById(id);
     delete el.dataset.userEdited;
+    el.disabled = false;
   });
+  replyContextMailId = null;
   setStatus("compose-status", "");
+}
+
+async function onAiGenerateReplyClick() {
+  if (!replyContextMailId) return;
+  const bodyEl = document.getElementById("compose-body");
+  setStatus("compose-status", "AI yanıt üretiyor...");
+  try {
+    const data = await backendFetch("/api/v1/writer/generate", {
+      method: "POST",
+      body: JSON.stringify({ mail_id: replyContextMailId, action: "neutral" }),
+    });
+    bodyEl.value = data.content || "";
+    bodyEl.dataset.userEdited = "1";
+    setStatus("compose-status", "AI yanıtı üretildi", "success");
+  } catch (err) {
+    if (handleBackendActionError(err)) return;
+    setStatus("compose-status", "Hata: " + err.message, "error");
+  }
+}
+
+async function onSaveDraftClick() {
+  if (!replyContextMailId) return;
+  const content = document.getElementById("compose-body").value;
+  setStatus("compose-status", "Taslak kaydediliyor...");
+  try {
+    await backendFetch("/api/v1/writer/save", {
+      method: "POST",
+      body: JSON.stringify({ mail_id: replyContextMailId, content }),
+    });
+    setStatus("compose-status", "Taslak kaydedildi", "success");
+    showToast("Taslak kaydedildi");
+  } catch (err) {
+    if (handleBackendActionError(err)) return;
+    setStatus("compose-status", "Hata: " + err.message, "error");
+  }
+}
+
+async function sendReplyViaWriter(mailId, content) {
+  setStatus("compose-status", "Gönderiliyor...");
+  try {
+    await backendFetch("/api/v1/writer/send", {
+      method: "POST",
+      body: JSON.stringify({ mail_id: mailId, content }),
+    });
+    setStatus("compose-status", "Mail başarıyla gönderildi", "success");
+    showToast("Mail gönderildi");
+    clearReplyContext();
+  } catch (err) {
+    if (handleBackendActionError(err)) return;
+    setStatus("compose-status", "Hata: " + err.message, "error");
+  }
 }
 
 function utf8ToBase64Url(str) {
@@ -391,31 +638,6 @@ async function sendMail(to, subject, body) {
   }
 }
 
-// ----------------------- Yerel AI Çağrısı ----------------------
-
-async function callLocalModel(prompt) {
-  if (!runtimeConfig) await loadConfig();
-  const url = runtimeConfig.local_model_url;
-  const modelName = runtimeConfig.model_name;
-
-  if (!url) {
-    throw new Error("Yerel model adresi tanımlı değil (config.json).");
-  }
-
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ prompt, model: modelName }),
-  });
-
-  if (!res.ok) {
-    throw new Error(`Yerel model hatası (${res.status})`);
-  }
-
-  const data = await res.json();
-  return (data.response || "").trim();
-}
-
 // ----------------------- Özetleme ------------------------------
 
 function renderSummaryBullets(text) {
@@ -440,18 +662,24 @@ async function onSummarizeClick() {
   const area = document.getElementById("summary-area");
   const content = document.getElementById("summary-content");
   area.classList.remove("hidden");
-  content.innerHTML = '<span class="spinner"></span> Yerel modele istek gönderiliyor...';
-
-  const prompt =
-    "Aşağıdaki e-postayı kısa ve öz bir şekilde Türkçe olarak özetle. " +
-    "Önemli noktaları madde madde belirt:\n\n" +
-    currentMail.body;
+  content.innerHTML = '<span class="spinner"></span> Sunucudan özet isteniyor...';
 
   try {
-    const summary = await callLocalModel(prompt);
-    content.innerHTML = summary ? renderSummaryBullets(summary) : "(Boş cevap)";
+    const data = await backendFetch("/api/v1/assist/summarize", {
+      method: "POST",
+      body: JSON.stringify({
+        subject: currentMail.subject,
+        body: currentMail.body,
+        message_id: currentMail.rfcMessageId,
+      }),
+    });
+    const badge = data.source === "cache" ? "Kayıtlı özet" : "AI özeti";
+    content.innerHTML = data.summary
+      ? `<div style="font-size:10px; font-weight:600; color:var(--slate-400); margin-bottom:4px;">${badge}</div>` + renderSummaryBullets(data.summary)
+      : "(Boş cevap)";
   } catch (err) {
-    content.innerHTML = `<span style="color:#DC2626">Hata: ${escapeHtml(err.message)}</span><br><small>Yerel model adresinin doğru olduğundan emin olun (Ayarlar sekmesi).</small>`;
+    if (handleBackendActionError(err)) return;
+    content.innerHTML = `<span style="color:#DC2626">Hata: ${escapeHtml(err.message)}</span>`;
   }
 }
 
@@ -466,29 +694,16 @@ function normalizeLabelName(s) {
 }
 
 async function suggestLabelFromAI(mailBody, subject, existingLabels) {
-  const labelList = existingLabels.length
-    ? existingLabels.map((l) => `- ${l.name}`).join("\n")
-    : "(henüz hiç kullanıcı etiketi yok)";
-
-  const prompt =
-    "Sen bir e-posta sınıflandırma asistanısın. Görevin: aşağıdaki e-postayı en uygun şekilde kategorize edecek **kısa bir etiket adı** üretmek.\n\n" +
-    "KURALLAR:\n" +
-    "1. Etiket adı 1-2 kelime olmalı, Türkçe.\n" +
-    "2. Eğer aşağıdaki MEVCUT ETİKETLER listesinden biri uygunsa, ONUN AYNISINI yaz.\n" +
-    "3. Hiçbiri uygun değilse yeni bir etiket adı öner (Örnekler: Faturalar, İş, Eğitim, Bildirimler, Sosyal, Alışveriş, Banka, Yolculuk).\n" +
-    "4. SADECE etiket adını döndür. Açıklama, tırnak, noktalama veya başka metin yazma.\n\n" +
-    "MEVCUT ETİKETLER:\n" + labelList + "\n\n" +
-    `KONU: ${subject || "(yok)"}\n\n` +
-    "İÇERİK:\n" + (mailBody || "").slice(0, 1500) + "\n\n" +
-    "Etiket adı:";
-
-  const raw = await callLocalModel(prompt);
-  // Modelin döndürdüğü cevapta birden fazla satır/karakter olabilir
-  let suggested = raw.split(/\r?\n/)[0].trim();
-  // Tırnak, nokta vb. kaldır
-  suggested = suggested.replace(/^["'`]+|["'`.,;:!?]+$/g, "").trim();
-  if (!suggested) throw new Error("Model boş cevap döndürdü.");
-  return suggested;
+  const data = await backendFetch("/api/v1/assist/suggest-label", {
+    method: "POST",
+    body: JSON.stringify({
+      subject: subject || "",
+      body: mailBody || "",
+      existing_labels: existingLabels.map((l) => l.name),
+    }),
+  });
+  if (!data.label) throw new Error("Sunucu boş cevap döndürdü.");
+  return data.label;
 }
 
 async function createLabel(name) {
@@ -554,6 +769,7 @@ async function onSmartLabelClick() {
 
     renderLabelChips();
   } catch (err) {
+    if (handleBackendActionError(err)) return;
     if (titleEl) titleEl.textContent = "Hata";
     content.innerHTML = `<span style="color:#DC2626">${escapeHtml(err.message)}</span>`;
   }
@@ -580,8 +796,6 @@ function renderLabelChips() {
 
 function fillSettingsForm() {
   document.getElementById("cfg-backend-url").value = runtimeConfig.backend_url || "";
-  document.getElementById("cfg-model-url").value = runtimeConfig.local_model_url || "";
-  document.getElementById("cfg-model-name").value = runtimeConfig.model_name || "";
 
   const cid = runtimeConfig.google_client_id || "";
   document.getElementById("cfg-client-id").value = cid;
@@ -600,8 +814,6 @@ async function onSaveSettings() {
   const newCfg = {
     ...runtimeConfig,
     backend_url: document.getElementById("cfg-backend-url").value.trim(),
-    local_model_url: document.getElementById("cfg-model-url").value.trim(),
-    model_name: document.getElementById("cfg-model-name").value.trim(),
   };
   await saveConfig(newCfg);
   fillSettingsForm();
@@ -663,14 +875,22 @@ function bindEvents() {
 
   document.getElementById("compose-form").addEventListener("submit", (e) => {
     e.preventDefault();
+    const body = document.getElementById("compose-body").value;
+    if (replyContextMailId) {
+      sendReplyViaWriter(replyContextMailId, body);
+      return;
+    }
     const to = document.getElementById("compose-to").value.trim();
     const subject = document.getElementById("compose-subject").value.trim();
-    const body = document.getElementById("compose-body").value;
     sendMail(to, subject, body);
   });
 
+  document.getElementById("btn-ai-generate-reply").addEventListener("click", onAiGenerateReplyClick);
+  document.getElementById("btn-save-draft").addEventListener("click", onSaveDraftClick);
+
   document.getElementById("btn-clear-compose").addEventListener("click", clearReplyContext);
   document.getElementById("btn-clear-reply").addEventListener("click", clearReplyContext);
+  document.getElementById("btn-link-account").addEventListener("click", onLinkAccountClick);
 
   // Kullanıcı manuel düzenlerse otomatik doldurmayı durdur
   ["compose-to", "compose-subject", "compose-body"].forEach((id) => {
@@ -681,6 +901,9 @@ function bindEvents() {
 
   document.getElementById("btn-save-settings").addEventListener("click", onSaveSettings);
   document.getElementById("btn-reset-settings").addEventListener("click", onResetSettings);
+
+  document.getElementById("backend-login-form").addEventListener("submit", onBackendLoginSubmit);
+  document.getElementById("btn-backend-logout").addEventListener("click", onBackendLogoutClick);
 }
 
 // ----------------------- Başlangıç -----------------------------
@@ -692,7 +915,18 @@ async function init() {
   await loadConfig();
   fillSettingsForm();
 
-  // Sessiz token denemesi
+  const session = await checkBackendSession();
+  if (!session) {
+    showBackendLoginGate();
+    return;
+  }
+  if (session.must_change_password) {
+    showBackendPasswordChangeGate();
+    return;
+  }
+  enterBackendApp(session);
+
+  // Sessiz token denemesi (Gmail/Google tarafı)
   let loggedIn = false;
   try {
     await getAuthToken(false);
